@@ -1,0 +1,21 @@
+CREATE EXTENSION helix;
+SELECT helix_ai.version();
+ version 
+---------
+ 0.1.0
+(1 row)
+
+SELECT nspname FROM pg_namespace WHERE nspname = 'helix_ai';
+ nspname  
+----------
+ helix_ai
+(1 row)
+
+-- extension objects are removed cleanly
+DROP EXTENSION helix;
+SELECT count(*) AS leftover_schema FROM pg_namespace WHERE nspname = 'helix_ai';
+ leftover_schema 
+-----------------
+               0
+(1 row)
+
