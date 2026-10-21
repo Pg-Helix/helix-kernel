@@ -1,0 +1,14 @@
+CREATE TABLE public.keyless_events (id bigint, payload text);
+SET helix.tenant = 'acme';
+-- No primary key: register_source must reject this rather than register a
+-- row with no stable identity.
+SELECT helix_ai.register_source('public', 'keyless_events', 'embed-v1', 'rev1', 'pipeline-v1');
+ERROR:  helix: table public.keyless_events has no primary key; register_source requires a stable row key
+CONTEXT:  PL/pgSQL function register_source(name,name,text,text,text,integer,text) line 29 at RAISE
+SELECT helix_ai.register_source('public', 'does_not_exist', 'embed-v1', 'rev1', 'pipeline-v1');
+ERROR:  helix: relation public.does_not_exist not found
+CONTEXT:  PL/pgSQL function register_source(name,name,text,text,text,integer,text) line 19 at RAISE
+RESET helix.tenant;
+SELECT helix_ai.register_source('public', 'keyless_events', 'embed-v1', 'rev1', 'pipeline-v1');
+ERROR:  helix: helix.tenant is not set for this session; register_source needs a tenant context
+CONTEXT:  PL/pgSQL function register_source(name,name,text,text,text,integer,text) line 10 at RAISE
