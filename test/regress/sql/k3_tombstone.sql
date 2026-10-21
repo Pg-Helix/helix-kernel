@@ -1,0 +1,18 @@
+CREATE TABLE public.k3_notes (id bigint PRIMARY KEY, body text);
+
+SET helix.tenant = 'k3-tenant';
+SELECT helix_ai.register_source('public', 'k3_notes', 'embed-v1', 'rev1', 'pipeline-v1') AS k3_notes_source_id \gset
+
+INSERT INTO public.k3_notes VALUES (1, 'temp');
+SELECT j.* FROM helix_ai.claim_job() AS j \gset
+
+-- The source row is deleted while a worker still holds a lease on it.
+DELETE FROM public.k3_notes WHERE id = 1;
+SELECT status, value FROM helix_ai.status WHERE source_id = :k3_notes_source_id;
+
+-- The in-flight worker's publish is rejected: no resurrection.
+SELECT helix_ai.publish_result(:'job_id', :lease_epoch, :'source_digest', :'target_model', :'pipeline_version', '"temp embedding"');
+SELECT status, value FROM helix_ai.status WHERE source_id = :k3_notes_source_id;
+
+-- request_refresh also refuses a tombstoned key.
+SELECT helix_ai.request_refresh(:k3_notes_source_id, jsonb_build_object('id', '1'));

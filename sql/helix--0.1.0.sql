@@ -104,6 +104,8 @@ SELECT
     s.table_name,
     dv.source_key,
     dv.status,
+    dv.source_digest,
+    dv.value,
     dv.generated_at
 FROM helix_ai.source s
 LEFT JOIN helix_ai.derived_value dv ON dv.source_id = s.id;
@@ -215,6 +217,7 @@ BEGIN
     RETURNING id INTO v_id;
 
     PERFORM helix_ai._create_enriched_view(v_id);
+    PERFORM helix_ai._ensure_capture_trigger(p_schema, p_table);
 
     RETURN v_id;
 END;
@@ -222,3 +225,374 @@ $$;
 
 REVOKE ALL ON FUNCTION helix_ai.register_source(name, name, text, text, text, integer, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION helix_ai.register_source(name, name, text, text, text, integer, text) TO PUBLIC;
+
+-- =============================================================================
+-- K3: refresh/publish (RFC-0001 M3, RFC-0003 job/worker protocol, ADR-0003)
+--
+-- Native capture mode only (ADR-0003): a row trigger writes the outbox job
+-- in the same transaction as the source change. External-Go polling mode
+-- (for deployments that cannot grant trigger-create privilege) is documented
+-- in ADR-0003/ADR-0004 as a weaker fallback and is not implemented here.
+--
+-- Credential boundary: claim_job and publish_result are REVOKEd from PUBLIC
+-- with no default grant (unlike register_source/request_refresh, which stay
+-- open like version()) -- a deployment must explicitly GRANT EXECUTE to its
+-- narrow worker role. Neither function, nor the role it is granted to,
+-- needs or gets any privilege on application tables: both operate entirely
+-- through helix_ai's own tables via SECURITY DEFINER.
+-- =============================================================================
+
+CREATE TYPE helix_ai.publish_outcome AS ENUM (
+    'ok', 'stale_lease', 'stale_source', 'model_mismatch', 'pipeline_mismatch', 'tombstoned'
+);
+
+-- helix_ai.job: the outbox (RFC-0003 job contract: tenant, immutable job_id,
+-- source revision/digest, pipeline version, target model, deadline,
+-- attempts, lease epoch, trace id). Not tenant-RLS'd: nothing ever queries
+-- it directly -- app code only ever calls request_refresh, workers only
+-- ever call claim_job/publish_result (both SECURITY DEFINER) -- so there is
+-- no direct multi-tenant read path here for RLS to protect.
+CREATE TABLE helix_ai.job (
+    job_id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant           text NOT NULL,
+    source_id        bigint NOT NULL REFERENCES helix_ai.source(id) ON DELETE CASCADE,
+    source_key       jsonb NOT NULL,
+    -- source_digest/target_model/pipeline_version are frozen at enqueue
+    -- time: what this job was issued against. publish_result compares them
+    -- against the CURRENT state (helix_ai.derived_value/helix_ai.source) to
+    -- decide the five outcomes below -- comparing a job against itself
+    -- would never catch anything, since nothing here ever changes post-insert
+    -- except attempts/lease_epoch/completed_at/dead_letter.
+    source_digest    text NOT NULL,
+    target_model     text NOT NULL,
+    pipeline_version text NOT NULL,
+    deadline         timestamptz,
+    attempts         integer NOT NULL DEFAULT 0,
+    lease_epoch      integer NOT NULL DEFAULT 0,
+    trace_id         text NOT NULL DEFAULT gen_random_uuid()::text,
+    completed_at     timestamptz,
+    dead_letter      boolean NOT NULL DEFAULT false,
+    created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX job_claimable_idx ON helix_ai.job (created_at)
+    WHERE completed_at IS NULL AND NOT dead_letter;
+
+-- _row_key_jsonb builds the same {column: value::text} shape
+-- _source_key_expr builds for the enriched view's join predicate, but from
+-- an actual composite row value (a trigger's NEW/OLD) instead of SQL text --
+-- there is no FROM-clause alias to join against inside a trigger. Both
+-- encode RFC-0003's source_key contract and must stay in the same shape;
+-- row_value is declared `record` (PL/pgSQL-only) since a trigger's NEW/OLD
+-- has no fixed, statically-known type.
+CREATE FUNCTION helix_ai._row_key_jsonb(key_columns name[], row_value record)
+RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    v_key jsonb := '{}'::jsonb;
+    v_col name;
+    v_val text;
+BEGIN
+    FOREACH v_col IN ARRAY key_columns LOOP
+        EXECUTE format('SELECT ($1).%I::text', v_col) INTO v_val USING row_value;
+        v_key := v_key || jsonb_build_object(v_col, v_val);
+    END LOOP;
+    RETURN v_key;
+END;
+$$;
+
+-- _capture_change is installed by register_source as an AFTER INSERT OR
+-- UPDATE OR DELETE trigger on every registered table. One table can carry
+-- more than one registration (different model/pipeline); this fires once
+-- per row change and fans out to every matching helix_ai.source row, so
+-- only one trigger per table is ever created (see _ensure_capture_trigger).
+--
+-- Row digest is over the whole row (md5(row::text)), not a per-registration
+-- feature mapping of specific tracked columns -- any column change marks
+-- every registration on this table stale, including ones logically
+-- unrelated to the AI-derived value. A coarser, honest simplification for
+-- K3; column-scoped digesting can follow once a workload shows the extra
+-- staleness/recompute churn actually matters.
+CREATE FUNCTION helix_ai._capture_change() RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, helix_ai
+AS $$
+DECLARE
+    v_source helix_ai.source%ROWTYPE;
+    v_row    record;
+    v_key    jsonb;
+    v_digest text;
+BEGIN
+    v_row := COALESCE(NEW, OLD);
+
+    FOR v_source IN
+        SELECT * FROM helix_ai.source
+        WHERE schema_name = TG_TABLE_SCHEMA::name AND table_name = TG_TABLE_NAME::name
+    LOOP
+        v_key := helix_ai._row_key_jsonb(v_source.key_columns, v_row);
+
+        IF TG_OP = 'DELETE' THEN
+            -- Tombstone: publish_result rejects any later write to this key
+            -- (status = 'deleted'), so a worker already in flight when the
+            -- delete commits cannot resurrect it.
+            INSERT INTO helix_ai.derived_value (source_id, tenant, source_key, status, value, source_digest, generated_at)
+            VALUES (v_source.id, v_source.tenant, v_key, 'deleted', NULL, NULL, now())
+            ON CONFLICT (source_id, source_key) DO UPDATE
+                SET status = 'deleted', value = NULL, source_digest = NULL, generated_at = now();
+        ELSE
+            v_digest := md5(v_row::text);
+
+            INSERT INTO helix_ai.derived_value (source_id, tenant, source_key, status, source_digest)
+            VALUES (v_source.id, v_source.tenant, v_key, 'pending', v_digest)
+            ON CONFLICT (source_id, source_key) DO UPDATE
+                SET status = CASE
+                        WHEN helix_ai.derived_value.source_digest IS DISTINCT FROM EXCLUDED.source_digest THEN
+                            CASE WHEN helix_ai.derived_value.status = 'ready' THEN 'stale'::helix_ai.pseudo_column_status ELSE 'pending'::helix_ai.pseudo_column_status END
+                        ELSE helix_ai.derived_value.status
+                    END,
+                    source_digest = EXCLUDED.source_digest;
+
+            -- Enqueue only when something actually needs (re)processing:
+            -- first time seen, or the digest just changed. A row already
+            -- 'pending' with the same digest can still pick up a second job
+            -- here (no dedup against outstanding jobs) -- acceptable per
+            -- RFC-0003's "duplicate delivery is harmless", which
+            -- publish_result's CAS makes true rather than this trying to
+            -- prevent duplicates from existing in the first place.
+            IF NOT EXISTS (
+                SELECT 1 FROM helix_ai.derived_value
+                WHERE source_id = v_source.id AND source_key = v_key AND status = 'ready' AND source_digest = v_digest
+            ) THEN
+                INSERT INTO helix_ai.job (tenant, source_id, source_key, source_digest, target_model, pipeline_version)
+                VALUES (v_source.tenant, v_source.id, v_key, v_digest, v_source.model_id || ':' || v_source.model_revision, v_source.pipeline_version);
+            END IF;
+        END IF;
+    END LOOP;
+
+    RETURN v_row;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION helix_ai._capture_change() FROM PUBLIC;
+
+CREATE FUNCTION helix_ai._ensure_capture_trigger(p_schema name, p_table name)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, helix_ai
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_trigger t
+        JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = p_schema AND c.relname = p_table AND t.tgname = 'helix_ai_capture'
+    ) THEN
+        EXECUTE format(
+            'CREATE TRIGGER helix_ai_capture AFTER INSERT OR UPDATE OR DELETE ON %I.%I
+             FOR EACH ROW EXECUTE FUNCTION helix_ai._capture_change()',
+            p_schema, p_table
+        );
+    END IF;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION helix_ai._ensure_capture_trigger(name, name) FROM PUBLIC;
+
+-- request_refresh re-reads the CURRENT row at p_source_key (not whatever
+-- digest happened to be cached) and enqueues a job against it -- for a
+-- retry after a dead-lettered job, or simply asking for (re)processing
+-- without waiting on a row change. A tombstoned key cannot be refreshed:
+-- its source row is gone: there is nothing to read.
+CREATE FUNCTION helix_ai.request_refresh(p_source_id bigint, p_source_key jsonb)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, helix_ai
+AS $$
+DECLARE
+    v_source helix_ai.source%ROWTYPE;
+    v_digest text;
+    v_job_id uuid;
+    v_col    name;
+    v_conds  text[] := '{}';
+BEGIN
+    SELECT * INTO v_source FROM helix_ai.source WHERE id = p_source_id;
+    IF v_source.id IS NULL THEN
+        RAISE EXCEPTION 'helix: source % not registered', p_source_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM helix_ai.derived_value
+        WHERE source_id = p_source_id AND source_key = p_source_key AND status = 'deleted'
+    ) THEN
+        RAISE EXCEPTION 'helix: source key % is deleted; cannot request a refresh', p_source_key;
+    END IF;
+
+    FOREACH v_col IN ARRAY v_source.key_columns LOOP
+        v_conds := v_conds || format('%I = %L', v_col, p_source_key ->> v_col);
+    END LOOP;
+
+    EXECUTE format('SELECT md5(t::text) FROM %I.%I AS t WHERE %s',
+        v_source.schema_name, v_source.table_name, array_to_string(v_conds, ' AND '))
+    INTO v_digest;
+
+    IF v_digest IS NULL THEN
+        RAISE EXCEPTION 'helix: no row matching % in %.%', p_source_key, v_source.schema_name, v_source.table_name;
+    END IF;
+
+    INSERT INTO helix_ai.derived_value (source_id, tenant, source_key, status, source_digest)
+    VALUES (v_source.id, v_source.tenant, p_source_key, 'pending', v_digest)
+    ON CONFLICT (source_id, source_key) DO UPDATE
+        SET status = 'pending', source_digest = v_digest;
+
+    INSERT INTO helix_ai.job (tenant, source_id, source_key, source_digest, target_model, pipeline_version)
+    VALUES (v_source.tenant, v_source.id, p_source_key, v_digest, v_source.model_id || ':' || v_source.model_revision, v_source.pipeline_version)
+    RETURNING job_id INTO v_job_id;
+
+    RETURN v_job_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION helix_ai.request_refresh(bigint, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION helix_ai.request_refresh(bigint, jsonb) TO PUBLIC;
+
+-- claim_job leases one claimable job (FOR UPDATE SKIP LOCKED: concurrent
+-- callers each get a different row, never the same one) and increments its
+-- attempts/lease_epoch. A job whose attempts just exceeded p_max_attempts is
+-- dead-lettered instead: it stops being claimable, and its sidecar row is
+-- marked 'failed' (RFC-0003 dead-letter) rather than re-leased forever.
+CREATE FUNCTION helix_ai.claim_job(p_lease_seconds integer DEFAULT 30, p_max_attempts integer DEFAULT 5)
+RETURNS helix_ai.job
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, helix_ai
+AS $$
+DECLARE
+    v_job_id uuid;
+    v_job    helix_ai.job%ROWTYPE;
+BEGIN
+    SELECT job_id INTO v_job_id
+    FROM helix_ai.job
+    WHERE completed_at IS NULL
+      AND NOT dead_letter
+      AND (deadline IS NULL OR deadline < now())
+    ORDER BY created_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1;
+
+    IF v_job_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    UPDATE helix_ai.job SET attempts = attempts + 1 WHERE job_id = v_job_id
+    RETURNING * INTO v_job;
+
+    IF v_job.attempts > p_max_attempts THEN
+        UPDATE helix_ai.job SET dead_letter = true WHERE job_id = v_job_id;
+        UPDATE helix_ai.derived_value
+        SET status = 'failed'
+        WHERE source_id = v_job.source_id AND source_key = v_job.source_key AND status <> 'deleted';
+        RETURN NULL;
+    END IF;
+
+    UPDATE helix_ai.job
+    SET lease_epoch = lease_epoch + 1, deadline = now() + make_interval(secs => p_lease_seconds)
+    WHERE job_id = v_job_id
+    RETURNING * INTO v_job;
+
+    RETURN v_job;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION helix_ai.claim_job(integer, integer) FROM PUBLIC;
+
+-- publish_result: the compare-and-set (RFC-0003). p_expected_* must equal
+-- what claim_job returned for this job_id -- a mismatch is a caller bug
+-- (RAISE EXCEPTION), not one of the five soft outcomes below, which compare
+-- against *current* state instead:
+--   stale_lease        job gone, already completed, or re-leased to a
+--                       higher epoch
+--   tombstoned          the sidecar row is deleted
+--   stale_source        the sidecar's live digest no longer matches (source
+--                       row changed since this job was issued)
+--   model_mismatch       the registration's current model no longer matches
+--   pipeline_mismatch    the registration's current pipeline no longer matches
+-- The sidecar write itself is ONE atomic UPDATE ... WHERE (not a separate
+-- read then write): a concurrent source change racing this publish cannot
+-- be silently overwritten by a write that read stale state just before it.
+CREATE FUNCTION helix_ai.publish_result(
+    p_job_id            uuid,
+    p_lease_epoch        integer,
+    p_expected_digest    text,
+    p_expected_model     text,
+    p_expected_pipeline  text,
+    p_value              jsonb
+) RETURNS helix_ai.publish_outcome
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, helix_ai
+AS $$
+DECLARE
+    v_job       helix_ai.job%ROWTYPE;
+    v_source    helix_ai.source%ROWTYPE;
+    v_dv_status helix_ai.pseudo_column_status;
+    v_dv_digest text;
+    v_rows      int;
+BEGIN
+    -- Locks the job row for this CAS's duration: two concurrent
+    -- publish_result calls for the SAME job_id (e.g. a crashed-and-retried
+    -- worker racing its own earlier attempt) serialize here instead of both
+    -- passing a check-then-act race independently.
+    SELECT * INTO v_job FROM helix_ai.job WHERE job_id = p_job_id FOR UPDATE;
+    IF v_job.job_id IS NULL THEN
+        RETURN 'stale_lease';
+    END IF;
+
+    IF v_job.source_digest IS DISTINCT FROM p_expected_digest
+       OR v_job.target_model IS DISTINCT FROM p_expected_model
+       OR v_job.pipeline_version IS DISTINCT FROM p_expected_pipeline THEN
+        RAISE EXCEPTION 'helix: expected_* parameters do not match the job identified by p_job_id; publish_result must be called with exactly what claim_job returned for this job';
+    END IF;
+
+    IF v_job.completed_at IS NOT NULL OR v_job.lease_epoch <> p_lease_epoch THEN
+        RETURN 'stale_lease';
+    END IF;
+
+    SELECT * INTO v_source FROM helix_ai.source WHERE id = v_job.source_id;
+    IF (v_source.model_id || ':' || v_source.model_revision) IS DISTINCT FROM p_expected_model THEN
+        RETURN 'model_mismatch';
+    END IF;
+    IF v_source.pipeline_version IS DISTINCT FROM p_expected_pipeline THEN
+        RETURN 'pipeline_mismatch';
+    END IF;
+
+    PERFORM set_config('helix.tenant', v_job.tenant, true);
+
+    UPDATE helix_ai.derived_value
+    SET value = p_value, status = 'ready', generated_at = now()
+    WHERE source_id = v_job.source_id
+      AND source_key = v_job.source_key
+      AND source_digest = p_expected_digest
+      AND status <> 'deleted';
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+
+    IF v_rows = 0 THEN
+        SELECT status, source_digest INTO v_dv_status, v_dv_digest
+        FROM helix_ai.derived_value WHERE source_id = v_job.source_id AND source_key = v_job.source_key;
+        IF v_dv_status = 'deleted' THEN
+            RETURN 'tombstoned';
+        END IF;
+        RETURN 'stale_source';
+    END IF;
+
+    UPDATE helix_ai.job SET completed_at = now() WHERE job_id = p_job_id;
+
+    RETURN 'ok';
+END;
+$$;
+
+REVOKE ALL ON FUNCTION helix_ai.publish_result(uuid, integer, text, text, text, jsonb) FROM PUBLIC;
