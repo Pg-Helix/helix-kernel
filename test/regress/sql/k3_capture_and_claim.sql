@@ -11,10 +11,10 @@ SELECT status, source_digest IS NOT NULL AS has_digest FROM helix_ai.status WHER
 SELECT count(*) AS queued_jobs FROM helix_ai.job WHERE source_id = :k3_source_id AND completed_at IS NULL;
 
 -- claim_job leases exactly that job.
-SELECT target_model, pipeline_version, attempts, lease_epoch FROM helix_ai.claim_job();
+SELECT target_model, pipeline_version, attempts, lease_epoch FROM helix_ai.claim_job('embed-v1:rev1');
 
 -- A second concurrent claim finds nothing claimable (lease not yet expired).
-SELECT helix_ai.claim_job() IS NULL AS nothing_else_claimable;
+SELECT helix_ai.claim_job('embed-v1:rev1') IS NULL AS nothing_else_claimable;
 
 -- request_refresh also enqueues a job, reading the row's current digest itself.
 SELECT helix_ai.request_refresh(:k3_source_id, jsonb_build_object('id', '1')) IS NOT NULL AS refresh_enqueued;
@@ -23,4 +23,4 @@ SELECT count(*) AS queued_after_refresh FROM helix_ai.job WHERE source_id = :k3_
 -- Lease it too (rather than publish), so this file leaves no unclaimed job
 -- behind for a later test file's claim_job() calls to pick up instead of
 -- its own.
-SELECT (helix_ai.claim_job()).job_id IS NOT NULL AS refresh_job_claimed;
+SELECT (helix_ai.claim_job('embed-v1:rev1')).job_id IS NOT NULL AS refresh_job_claimed;

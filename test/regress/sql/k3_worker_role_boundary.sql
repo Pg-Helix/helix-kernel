@@ -11,13 +11,18 @@ INSERT INTO public.k3_secrets VALUES (1, 'classified');
 
 CREATE ROLE helix_test_worker NOLOGIN;
 GRANT USAGE ON SCHEMA helix_ai TO helix_test_worker;
-GRANT EXECUTE ON FUNCTION helix_ai.claim_job(integer, integer) TO helix_test_worker;
+GRANT EXECUTE ON FUNCTION helix_ai.claim_job(text, integer, integer) TO helix_test_worker;
 GRANT EXECUTE ON FUNCTION helix_ai.publish_result(uuid, integer, text, text, text, jsonb) TO helix_test_worker;
+GRANT EXECUTE ON FUNCTION helix_ai.get_job_input(uuid, integer) TO helix_test_worker;
 
 SET ROLE helix_test_worker;
 
--- The worker CAN do its actual job end to end...
-SELECT j.* FROM helix_ai.claim_job() AS j \gset
+-- The worker CAN do its actual job end to end, including fetching its
+-- bounded authorized input (ADR-0006 decision 7) without any direct grant
+-- on the application table below...
+SELECT j.* FROM helix_ai.claim_job('embed-v1:rev1') AS j \gset
+SELECT helix_ai.get_job_input(:'job_id', :lease_epoch) AS fetched_input \gset
+SELECT :'fetched_input'::jsonb ->> 'confidential' AS worker_saw_confidential_via_get_job_input;
 SELECT helix_ai.publish_result(:'job_id', :lease_epoch, :'source_digest', :'target_model', :'pipeline_version', '"classified embedding"');
 
 -- ...but cannot write to helix_ai's own tables directly (no table grants,
@@ -34,7 +39,8 @@ SELECT * FROM public.k3_secrets;
 UPDATE public.k3_secrets SET confidential = 'tampered' WHERE id = 1;
 
 RESET ROLE;
-REVOKE ALL ON FUNCTION helix_ai.claim_job(integer, integer) FROM helix_test_worker;
+REVOKE ALL ON FUNCTION helix_ai.claim_job(text, integer, integer) FROM helix_test_worker;
 REVOKE ALL ON FUNCTION helix_ai.publish_result(uuid, integer, text, text, text, jsonb) FROM helix_test_worker;
+REVOKE ALL ON FUNCTION helix_ai.get_job_input(uuid, integer) FROM helix_test_worker;
 REVOKE USAGE ON SCHEMA helix_ai FROM helix_test_worker;
 DROP ROLE helix_test_worker;

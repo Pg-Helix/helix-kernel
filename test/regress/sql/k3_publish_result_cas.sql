@@ -5,7 +5,7 @@ SELECT helix_ai.register_source('public', 'k3_docs', 'embed-v1', 'rev1', 'pipeli
 
 INSERT INTO public.k3_docs VALUES (1, 'alpha');
 
-SELECT j.* FROM helix_ai.claim_job() AS j \gset
+SELECT j.* FROM helix_ai.claim_job('embed-v1:rev1') AS j \gset
 
 -- A valid publish, exactly matching what claim_job returned.
 SELECT helix_ai.publish_result(:'job_id', :lease_epoch, :'source_digest', :'target_model', :'pipeline_version', '"alpha embedding"');
@@ -21,13 +21,13 @@ SELECT ai_value, ai_status FROM public.k3_docs_ai WHERE id = 1;
 -- the (honest) caller passes -- the check is against the CURRENT
 -- registration, not the job's frozen copy.
 INSERT INTO public.k3_docs VALUES (2, 'beta');
-SELECT j.* FROM helix_ai.claim_job() AS j \gset
+SELECT j.* FROM helix_ai.claim_job('embed-v1:rev1') AS j \gset
 UPDATE helix_ai.source SET model_revision = 'rev2' WHERE id = :k3_docs_source_id;
 SELECT helix_ai.publish_result(:'job_id', :lease_epoch, :'source_digest', :'target_model', :'pipeline_version', '"beta embedding"');
 UPDATE helix_ai.source SET model_revision = 'rev1' WHERE id = :k3_docs_source_id;
 
 INSERT INTO public.k3_docs VALUES (3, 'gamma');
-SELECT j.* FROM helix_ai.claim_job() AS j \gset
+SELECT j.* FROM helix_ai.claim_job('embed-v1:rev1') AS j \gset
 UPDATE helix_ai.source SET pipeline_version = 'pipeline-v2' WHERE id = :k3_docs_source_id;
 SELECT helix_ai.publish_result(:'job_id', :lease_epoch, :'source_digest', :'target_model', :'pipeline_version', '"gamma embedding"');
 UPDATE helix_ai.source SET pipeline_version = 'pipeline-v1' WHERE id = :k3_docs_source_id;
@@ -35,5 +35,5 @@ UPDATE helix_ai.source SET pipeline_version = 'pipeline-v1' WHERE id = :k3_docs_
 -- Calling publish_result with expected_* values that do not match the
 -- job's own recorded ones at all is a caller bug, not a soft outcome.
 INSERT INTO public.k3_docs VALUES (4, 'delta');
-SELECT j.* FROM helix_ai.claim_job() AS j \gset
+SELECT j.* FROM helix_ai.claim_job('embed-v1:rev1') AS j \gset
 SELECT helix_ai.publish_result(:'job_id', :lease_epoch, 'wrong-digest', :'target_model', :'pipeline_version', '"x"');

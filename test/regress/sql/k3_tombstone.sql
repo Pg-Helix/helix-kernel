@@ -4,7 +4,7 @@ SET helix.tenant = 'k3-tenant';
 SELECT helix_ai.register_source('public', 'k3_notes', 'embed-v1', 'rev1', 'pipeline-v1') AS k3_notes_source_id \gset
 
 INSERT INTO public.k3_notes VALUES (1, 'temp');
-SELECT j.* FROM helix_ai.claim_job() AS j \gset
+SELECT j.* FROM helix_ai.claim_job('embed-v1:rev1') AS j \gset
 
 -- The source row is deleted while a worker still holds a lease on it.
 DELETE FROM public.k3_notes WHERE id = 1;

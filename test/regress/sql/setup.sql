@@ -21,6 +21,24 @@ ALTER FUNCTION helix_ai.version() OWNER TO helix_owner;
 ALTER FUNCTION helix_ai._source_key_expr(name[], name) OWNER TO helix_owner;
 ALTER FUNCTION helix_ai._create_enriched_view(bigint) OWNER TO helix_owner;
 ALTER FUNCTION helix_ai.register_source(name, name, text, text, text, integer, text) OWNER TO helix_owner;
+ALTER TABLE helix_ai.job OWNER TO helix_owner;
+ALTER TYPE helix_ai.publish_outcome OWNER TO helix_owner;
+ALTER FUNCTION helix_ai._row_key_jsonb(name[], record) OWNER TO helix_owner;
+ALTER FUNCTION helix_ai._tombstone_key(bigint, text, jsonb) OWNER TO helix_owner;
+ALTER FUNCTION helix_ai._capture_change() OWNER TO helix_owner;
+ALTER FUNCTION helix_ai._ensure_capture_trigger(name, name) OWNER TO helix_owner;
+ALTER FUNCTION helix_ai.request_refresh(bigint, jsonb) OWNER TO helix_owner;
+ALTER FUNCTION helix_ai.claim_job(text, integer, integer) OWNER TO helix_owner;
+ALTER FUNCTION helix_ai.publish_result(uuid, integer, text, text, text, jsonb) OWNER TO helix_owner;
+ALTER FUNCTION helix_ai.get_job_input(uuid, integer) OWNER TO helix_owner;
+
+-- helix_worker (ADR-0006 decision 1) is the only role a real deployment
+-- grants these three to; USAGE on the schema is required just to resolve
+-- the function names, same as any other role calling into helix_ai.
+GRANT USAGE ON SCHEMA helix_ai TO helix_worker;
+GRANT EXECUTE ON FUNCTION helix_ai.claim_job(text, integer, integer) TO helix_worker;
+GRANT EXECUTE ON FUNCTION helix_ai.publish_result(uuid, integer, text, text, text, jsonb) TO helix_worker;
+GRANT EXECUTE ON FUNCTION helix_ai.get_job_input(uuid, integer) TO helix_worker;
 
 -- helix_owner (now NOSUPERUSER) runs register_source's own DDL (CREATE
 -- TRIGGER, CREATE VIEW) as itself, not as whoever called register_source --

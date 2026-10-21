@@ -1,0 +1,45 @@
+-- get_job_input (ADR-0006 decision 7, helix-atlas): the bounded, authorized
+-- model-input contract -- re-validates the caller's lease, returns only the
+-- current row at the job's key, and rejects rows over the 1 MiB bound
+-- rather than truncating. A dedicated model revision keeps this file's jobs
+-- claim-isolated from every other k3_*.sql file.
+CREATE TABLE public.k3_input (id bigint PRIMARY KEY, body text);
+
+SET helix.tenant = 'k3-tenant';
+SELECT helix_ai.register_source('public', 'k3_input', 'embed-v1', 'jobinput-rev', 'pipeline-v1') AS k3_input_source_id \gset
+
+INSERT INTO public.k3_input VALUES (1, 'alpha');
+
+SET ROLE helix_worker;
+
+SELECT j.* FROM helix_ai.claim_job('embed-v1:jobinput-rev') AS j \gset
+
+-- The authorized lease-holder gets exactly the current row, as jsonb --
+-- not a digest, not an open SELECT.
+SELECT helix_ai.get_job_input(:'job_id', :lease_epoch) AS fetched_input \gset
+SELECT :'fetched_input'::jsonb AS fetched;
+
+-- Wrong lease_epoch: rejected even though the job_id is correct.
+SELECT helix_ai.get_job_input(:'job_id', :lease_epoch + 1);
+
+RESET ROLE;
+
+-- A dead-lettered job's lease is no longer valid, even presenting the
+-- epoch it actually held.
+INSERT INTO public.k3_input VALUES (2, 'beta');
+SELECT j.* FROM helix_ai.claim_job('embed-v1:jobinput-rev', 30, 1) AS j \gset
+\set dl_job_id :job_id
+\set dl_lease_epoch :lease_epoch
+UPDATE helix_ai.job SET deadline = now() - interval '1 second' WHERE job_id = :'dl_job_id';
+SELECT helix_ai.claim_job('embed-v1:jobinput-rev', 30, 1) IS NULL AS exhausted;
+
+SET ROLE helix_worker;
+SELECT helix_ai.get_job_input(:'dl_job_id', :dl_lease_epoch);
+RESET ROLE;
+
+-- A row over the 1 MiB bound is rejected outright, not silently truncated.
+INSERT INTO public.k3_input VALUES (3, repeat('x', 1100000));
+SET ROLE helix_worker;
+SELECT j.* FROM helix_ai.claim_job('embed-v1:jobinput-rev') AS j \gset
+SELECT helix_ai.get_job_input(:'job_id', :lease_epoch);
+RESET ROLE;
