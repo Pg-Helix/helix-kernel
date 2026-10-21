@@ -166,6 +166,18 @@ BEGIN
         p_source_id,
         helix_ai._source_key_expr(v_source.key_columns, 'src') || ' = dv.source_key'
     );
+
+    -- A newly created object's privileges are private to its owner
+    -- (helix_owner, since this function is SECURITY DEFINER) until
+    -- granted -- without this, "a plain SELECT against the resulting
+    -- enriched view reads the stored sidecar value" (the whole point of
+    -- register_source being PUBLIC-executable) is false for every real
+    -- caller, since none of them are helix_owner. Safe to grant broadly:
+    -- security_invoker means the real access control is still the
+    -- querying role's own privilege on the base table and
+    -- helix_ai.derived_value (RLS'd), exactly like register_source itself
+    -- being PUBLIC-executable doesn't bypass has_table_privilege.
+    EXECUTE format('GRANT SELECT ON %I.%I TO PUBLIC', v_source.schema_name, v_source.table_name || '_ai');
 END;
 $$;
 
