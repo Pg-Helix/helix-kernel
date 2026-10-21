@@ -4,9 +4,10 @@
 -- Extension-owned objects (helix_ai itself and everything in it) are still
 -- removed cleanly.
 DROP EXTENSION helix CASCADE;
-NOTICE:  drop cascades to 4 other objects
+NOTICE:  drop cascades to 5 other objects
 DETAIL:  drop cascades to view widgets_ai
 drop cascades to view order_lines_ai
+drop cascades to view owned_by_other_ai
 drop cascades to view notes_ai
 drop cascades to view docs_ai
 SELECT count(*) AS leftover_schema FROM pg_namespace WHERE nspname = 'helix_ai';

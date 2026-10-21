@@ -185,6 +185,15 @@ DECLARE
     v_relid       oid;
     v_key_columns name[];
     v_id          bigint;
+    -- The real caller's effective role, not current_user: inside a
+    -- SECURITY DEFINER function current_user is already this function's
+    -- owner for the whole call, so has_table_privilege(current_user, ...)
+    -- below would check the owner's privilege, not the caller's. The
+    -- `role` GUC is unaffected by that switch and reflects SET ROLE
+    -- (empirically verified: current_setting('role') still returns the
+    -- caller's role from inside this function); 'none' means no SET ROLE
+    -- was used, so the caller's actual connection identity is session_user.
+    v_caller      text;
 BEGIN
     v_tenant := current_setting('helix.tenant', true);
     IF v_tenant IS NULL OR v_tenant = '' THEN
@@ -198,6 +207,21 @@ BEGIN
 
     IF v_relid IS NULL THEN
         RAISE EXCEPTION 'helix: relation %.% not found', p_schema, p_table;
+    END IF;
+
+    -- ADR-0006 decision 2 (helix-atlas): register_source stays
+    -- PUBLIC-executable, but a caller may only ask it to create a trigger
+    -- and enriched view on a table the caller could already create a
+    -- trigger on themselves -- otherwise this SECURITY DEFINER function
+    -- would let any role attach a trigger to, and create a derived view
+    -- over, any table in the database regardless of ownership.
+    v_caller := current_setting('role');
+    IF v_caller = 'none' THEN
+        v_caller := session_user::text;
+    END IF;
+
+    IF NOT pg_catalog.has_table_privilege(v_caller, v_relid, 'TRIGGER') THEN
+        RAISE EXCEPTION 'helix: insufficient privilege on %.% to register it (TRIGGER privilege required)', p_schema, p_table;
     END IF;
 
     SELECT array_agg(a.attname ORDER BY k.ord) INTO v_key_columns
