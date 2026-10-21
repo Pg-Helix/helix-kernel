@@ -4,9 +4,10 @@
 -- Extension-owned objects (helix_ai itself and everything in it) are still
 -- removed cleanly.
 DROP EXTENSION helix CASCADE;
-NOTICE:  drop cascades to 18 other objects
+NOTICE:  drop cascades to 19 other objects
 DETAIL:  drop cascades to view widgets_ai
 drop cascades to view order_lines_ai
+drop cascades to view owned_by_other_ai
 drop cascades to view notes_ai
 drop cascades to view docs_ai
 drop cascades to view k3_items_ai

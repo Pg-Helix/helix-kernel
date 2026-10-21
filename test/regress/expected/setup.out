@@ -1,4 +1,33 @@
 CREATE EXTENSION helix;
+-- Ownership hardening (ADR-0006 decision 1, helix-atlas). CREATE EXTENSION
+-- must run as a privileged installer, but nothing requires that installer
+-- to keep ownership afterward -- and nothing should: FORCE ROW LEVEL
+-- SECURITY on helix_ai.source/derived_value is a no-op for a superuser
+-- owner (superusers bypass RLS unconditionally, FORCE notwithstanding), so
+-- every SECURITY DEFINER function in this extension was running with RLS
+-- silently disabled until ownership moves to a NOSUPERUSER NOBYPASSRLS
+-- role. Real deployments must run the same reassignment after install;
+-- extend this list as new helix_ai objects are added.
+CREATE ROLE helix_owner NOLOGIN NOSUPERUSER NOBYPASSRLS;
+CREATE ROLE helix_worker NOLOGIN;
+ALTER SCHEMA helix_ai OWNER TO helix_owner;
+ALTER TABLE helix_ai.source OWNER TO helix_owner;
+ALTER TABLE helix_ai.derived_value OWNER TO helix_owner;
+ALTER TYPE helix_ai.pseudo_column_status OWNER TO helix_owner;
+ALTER VIEW helix_ai.status OWNER TO helix_owner;
+ALTER FUNCTION helix_ai.version() OWNER TO helix_owner;
+ALTER FUNCTION helix_ai._source_key_expr(name[], name) OWNER TO helix_owner;
+ALTER FUNCTION helix_ai._create_enriched_view(bigint) OWNER TO helix_owner;
+ALTER FUNCTION helix_ai.register_source(name, name, text, text, text, integer, text) OWNER TO helix_owner;
+-- helix_owner (now NOSUPERUSER) runs register_source's own DDL (CREATE
+-- TRIGGER, CREATE VIEW) as itself, not as whoever called register_source --
+-- that DDL needs helix_owner's own privilege on the target table/schema
+-- regardless of the caller-side has_table_privilege check register_source
+-- performs. A real deployment grants this per schema it manages; tests
+-- grant it once via default privileges so every table any test file goes
+-- on to create is covered automatically.
+GRANT CREATE ON SCHEMA public TO helix_owner;
+ALTER DEFAULT PRIVILEGES GRANT TRIGGER ON TABLES TO helix_owner;
 SELECT helix_ai.version();
  version 
 ---------
