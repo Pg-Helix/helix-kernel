@@ -15,12 +15,24 @@ SELECT helix_ai.register_source('public', 'owned_by_other', 'embed-v1', 'rev1', 
 
 RESET ROLE;
 GRANT TRIGGER ON public.owned_by_other TO helix_test_registrar;
+GRANT SELECT, INSERT ON public.owned_by_other TO helix_test_registrar;
+GRANT SELECT ON helix_ai.derived_value TO helix_test_registrar;
 SET ROLE helix_test_registrar;
 
 -- TRIGGER privilege granted (ownership not required): now allowed.
 SELECT helix_ai.register_source('public', 'owned_by_other', 'embed-v1', 'rev1', 'pipeline-v1') IS NOT NULL AS registered;
 
+-- The enriched view is actually readable by this same non-owner caller --
+-- not just by helix_owner, who created it. Caught once already (the view
+-- is a fresh object, private to its creator until granted, regardless of
+-- security_invoker) by running this exact registration end to end as a
+-- real application role outside pg_regress; this is that gap's regression test.
+INSERT INTO public.owned_by_other VALUES (1, 'alice');
+SELECT id, name FROM public.owned_by_other_ai WHERE id = 1;
+
 RESET ROLE;
 REVOKE TRIGGER ON public.owned_by_other FROM helix_test_registrar;
+REVOKE SELECT, INSERT ON public.owned_by_other FROM helix_test_registrar;
+REVOKE SELECT ON helix_ai.derived_value FROM helix_test_registrar;
 REVOKE USAGE ON SCHEMA helix_ai FROM helix_test_registrar;
 DROP ROLE helix_test_registrar;
