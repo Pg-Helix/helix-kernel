@@ -725,10 +725,14 @@ DECLARE
     v_conds  text[] := '{}';
     v_input  jsonb;
 BEGIN
+    -- Job ids are random (gen_random_uuid()); deliberately not interpolated
+    -- into these messages, same as publish_result's own errors -- a
+    -- message that echoed it could never match a fixed expected-output
+    -- fixture across runs.
     SELECT * INTO v_job FROM helix_ai.job WHERE job_id = p_job_id;
     IF v_job.job_id IS NULL OR v_job.completed_at IS NOT NULL OR v_job.dead_letter
        OR v_job.lease_epoch <> p_lease_epoch THEN
-        RAISE EXCEPTION 'helix: lease_invalid: job % is not currently leased at epoch %', p_job_id, p_lease_epoch;
+        RAISE EXCEPTION 'helix: lease_invalid: job is not currently leased at epoch %', p_lease_epoch;
     END IF;
 
     PERFORM set_config('helix.tenant', v_job.tenant, true);
@@ -744,11 +748,11 @@ BEGIN
     INTO v_input;
 
     IF v_input IS NULL THEN
-        RAISE EXCEPTION 'helix: source row for job % no longer exists', p_job_id;
+        RAISE EXCEPTION 'helix: source row for this job no longer exists';
     END IF;
 
     IF pg_column_size(v_input) > 1048576 THEN
-        RAISE EXCEPTION 'helix: input_too_large: source row for job % exceeds the 1 MiB bound', p_job_id;
+        RAISE EXCEPTION 'helix: input_too_large: source row for this job exceeds the 1 MiB bound';
     END IF;
 
     RETURN v_input;

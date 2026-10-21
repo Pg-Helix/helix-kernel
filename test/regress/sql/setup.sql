@@ -44,11 +44,14 @@ GRANT EXECUTE ON FUNCTION helix_ai.get_job_input(uuid, integer) TO helix_worker;
 -- TRIGGER, CREATE VIEW) as itself, not as whoever called register_source --
 -- that DDL needs helix_owner's own privilege on the target table/schema
 -- regardless of the caller-side has_table_privilege check register_source
--- performs. A real deployment grants this per schema it manages; tests
+-- performs. request_refresh and get_job_input also read the application
+-- table's current row directly as helix_owner (to compute a digest / hand
+-- a worker its bounded input), so helix_owner needs SELECT on it too, not
+-- just TRIGGER. A real deployment grants this per schema it manages; tests
 -- grant it once via default privileges so every table any test file goes
 -- on to create is covered automatically.
 GRANT CREATE ON SCHEMA public TO helix_owner;
-ALTER DEFAULT PRIVILEGES GRANT TRIGGER ON TABLES TO helix_owner;
+ALTER DEFAULT PRIVILEGES GRANT SELECT, TRIGGER ON TABLES TO helix_owner;
 
 SELECT helix_ai.version();
 SELECT nspname FROM pg_namespace WHERE nspname = 'helix_ai';

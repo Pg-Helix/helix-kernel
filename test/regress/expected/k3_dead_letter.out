@@ -4,16 +4,22 @@
 -- value back to 'failed'. A dedicated model revision keeps this file's jobs
 -- claim-isolated from every other k3_*.sql file.
 CREATE TABLE public.k3_dl (id bigint PRIMARY KEY, body text);
-
 SET helix.tenant = 'k3-tenant';
 SELECT helix_ai.register_source('public', 'k3_dl', 'embed-v1', 'deadletter-rev', 'pipeline-v1') AS k3_dl_source_id \gset
-
 INSERT INTO public.k3_dl VALUES (1, 'alpha');
-
 -- Two jobs for the same digest/generation (duplicate delivery): the
 -- capture trigger's own job, plus an explicit refresh before either claims.
 SELECT helix_ai.request_refresh(:k3_dl_source_id, jsonb_build_object('id', '1')) IS NOT NULL AS extra_job_enqueued;
+ extra_job_enqueued 
+--------------------
+ t
+(1 row)
+
 SELECT count(*) AS outstanding_jobs FROM helix_ai.job WHERE source_id = :k3_dl_source_id AND completed_at IS NULL;
+ outstanding_jobs 
+------------------
+                2
+(1 row)
 
 -- Claim both now, so each has its own identity before either resolves.
 SELECT j.* FROM helix_ai.claim_job('embed-v1:deadletter-rev', 30, 1) AS j \gset
@@ -22,30 +28,60 @@ SELECT j.* FROM helix_ai.claim_job('embed-v1:deadletter-rev', 30, 1) AS j \gset
 \set job_a_digest :source_digest
 \set job_a_model :target_model
 \set job_a_pipeline :pipeline_version
-
 SELECT j.* FROM helix_ai.claim_job('embed-v1:deadletter-rev', 30, 1) AS j \gset
 \set job_b_id :job_id
 \set job_b_epoch :lease_epoch
 \set job_b_digest :source_digest
 \set job_b_model :target_model
 \set job_b_pipeline :pipeline_version
-
 -- Job B's worker publishes successfully first.
 SELECT helix_ai.publish_result(:'job_b_id', :job_b_epoch, :'job_b_digest', :'job_b_model', :'job_b_pipeline', '"alpha embedding"');
+ publish_result 
+----------------
+ ok
+(1 row)
+
 SELECT status, value FROM helix_ai.status WHERE source_id = :k3_dl_source_id AND source_key = jsonb_build_object('id', '1');
+ status |       value       
+--------+-------------------
+ ready  | "alpha embedding"
+(1 row)
 
 -- Job A's worker never publishes; its lease expires and it gets re-claimed
 -- and dead-lettered (max_attempts=1: the claim above already set
 -- attempts=1, a re-claim pushes it to 2 > 1).
 UPDATE helix_ai.job SET deadline = now() - interval '1 second' WHERE job_id = :'job_a_id';
 SELECT helix_ai.claim_job('embed-v1:deadletter-rev', 30, 1) IS NULL AS job_a_exhausted_and_dead_lettered;
+ job_a_exhausted_and_dead_lettered 
+-----------------------------------
+ t
+(1 row)
+
 SELECT dead_letter, attempts FROM helix_ai.job WHERE job_id = :'job_a_id';
+ dead_letter | attempts 
+-------------+----------
+ t           |        2
+(1 row)
 
 -- The obsolete job A's dead-lettering must NOT have downgraded the
 -- already-successful 'ready' value job B just published.
 SELECT status, value FROM helix_ai.status WHERE source_id = :k3_dl_source_id AND source_key = jsonb_build_object('id', '1');
+ status |       value       
+--------+-------------------
+ ready  | "alpha embedding"
+(1 row)
 
 -- Job A's worker tries to publish anyway: rejected as dead_lettered, not ok,
 -- even though it still presents the epoch it was originally leased at.
 SELECT helix_ai.publish_result(:'job_a_id', :job_a_epoch, :'job_a_digest', :'job_a_model', :'job_a_pipeline', '"from the abandoned worker"');
+ publish_result 
+----------------
+ dead_lettered
+(1 row)
+
 SELECT status, value FROM helix_ai.status WHERE source_id = :k3_dl_source_id AND source_key = jsonb_build_object('id', '1');
+ status |       value       
+--------+-------------------
+ ready  | "alpha embedding"
+(1 row)
+

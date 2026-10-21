@@ -4,7 +4,7 @@
 -- Extension-owned objects (helix_ai itself and everything in it) are still
 -- removed cleanly.
 DROP EXTENSION helix CASCADE;
-NOTICE:  drop cascades to 19 other objects
+NOTICE:  drop cascades to 30 other objects
 DETAIL:  drop cascades to view widgets_ai
 drop cascades to view order_lines_ai
 drop cascades to view owned_by_other_ai
@@ -15,8 +15,14 @@ drop cascades to view k3_docs_ai
 drop cascades to view k3_notes_ai
 drop cascades to view k3_jobs_table_ai
 drop cascades to view k3_secrets_ai
+drop cascades to view k3_gen_ai
+drop cascades to view k3_dl_ai
+drop cascades to view k3_scope_a_ai
+drop cascades to view k3_scope_b_ai
+drop cascades to view k3_input_ai
 drop cascades to trigger helix_ai_capture on table widgets
 drop cascades to trigger helix_ai_capture on table order_lines
+drop cascades to trigger helix_ai_capture on table owned_by_other
 drop cascades to trigger helix_ai_capture on table notes
 drop cascades to trigger helix_ai_capture on table docs
 drop cascades to trigger helix_ai_capture on table k3_items
@@ -24,6 +30,11 @@ drop cascades to trigger helix_ai_capture on table k3_docs
 drop cascades to trigger helix_ai_capture on table k3_notes
 drop cascades to trigger helix_ai_capture on table k3_jobs_table
 drop cascades to trigger helix_ai_capture on table k3_secrets
+drop cascades to trigger helix_ai_capture on table k3_gen
+drop cascades to trigger helix_ai_capture on table k3_dl
+drop cascades to trigger helix_ai_capture on table k3_scope_a
+drop cascades to trigger helix_ai_capture on table k3_scope_b
+drop cascades to trigger helix_ai_capture on table k3_input
 SELECT count(*) AS leftover_schema FROM pg_namespace WHERE nspname = 'helix_ai';
  leftover_schema 
 -----------------
