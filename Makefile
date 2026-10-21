@@ -12,3 +12,11 @@ PG_CPPFLAGS  = -I$(CURDIR)/include
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+# Real two-session concurrency tests (test/concurrency/): pg_regress runs
+# everything through one serial client, so it cannot express "two sessions
+# act at the same time." Needs the extension already `make install`ed and
+# a cluster already running and reachable via psql's usual PG* env vars.
+.PHONY: concurrency-check
+concurrency-check:
+	sh test/concurrency/run.sh

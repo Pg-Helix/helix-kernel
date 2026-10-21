@@ -8,3 +8,4 @@ mkdir /build && cp -r /src/. /build/ && chown -R postgres /build
 cd /build && make clean >/dev/null && make && make install
 su postgres -c "initdb -D /tmp/pg >/dev/null && pg_ctl -D /tmp/pg -w -o '-k /tmp -c listen_addresses=' start >/dev/null"
 su postgres -c "cd /build && PGHOST=/tmp make installcheck" || { cat /build/regression.diffs 2>/dev/null; exit 1; }
+su postgres -c "cd /build && PGHOST=/tmp make concurrency-check"
