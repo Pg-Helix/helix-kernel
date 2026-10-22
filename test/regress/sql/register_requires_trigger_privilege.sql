@@ -11,7 +11,7 @@ SET helix.tenant = 'registrar-tenant';
 SET ROLE helix_test_registrar;
 
 -- No privilege whatsoever on owned_by_other: rejected.
-SELECT helix_ai.register_source('public', 'owned_by_other', 'embed-v1', 'rev1', 'pipeline-v1');
+SELECT helix_ai.register_source('public', 'owned_by_other', 'embed-v1', 'registrar-rev', 'pipeline-v1');
 
 RESET ROLE;
 GRANT TRIGGER ON public.owned_by_other TO helix_test_registrar;
@@ -20,13 +20,19 @@ GRANT SELECT ON helix_ai.derived_value TO helix_test_registrar;
 SET ROLE helix_test_registrar;
 
 -- TRIGGER privilege granted (ownership not required): now allowed.
-SELECT helix_ai.register_source('public', 'owned_by_other', 'embed-v1', 'rev1', 'pipeline-v1') IS NOT NULL AS registered;
+SELECT helix_ai.register_source('public', 'owned_by_other', 'embed-v1', 'registrar-rev', 'pipeline-v1') IS NOT NULL AS registered;
 
 -- The enriched view is actually readable by this same non-owner caller --
 -- not just by helix_owner, who created it. Caught once already (the view
 -- is a fresh object, private to its creator until granted, regardless of
 -- security_invoker) by running this exact registration end to end as a
--- real application role outside pg_regress; this is that gap's regression test.
+-- real application role outside pg_regress; this is that gap's regression
+-- test. On the merged K3 branch this INSERT also fires the capture
+-- trigger, which is exactly why this registration uses its own model
+-- revision ('registrar-rev', above) distinct from every k3_*.sql file's
+-- 'embed-v1:rev1' -- caught once already too, when the leftover job this
+-- INSERT creates made k3_capture_and_claim.sql's "nothing else claimable"
+-- assertion fail.
 INSERT INTO public.owned_by_other VALUES (1, 'alice');
 SELECT id, name FROM public.owned_by_other_ai WHERE id = 1;
 
