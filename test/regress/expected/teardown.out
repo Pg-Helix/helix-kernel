@@ -1,0 +1,18 @@
+-- Enriched views live in the registered table's own schema (public), not in
+-- the extension, so they are not extension members -- CASCADE is required
+-- and expected, the same as dropping any table other objects depend on.
+-- Extension-owned objects (helix_ai itself and everything in it) are still
+-- removed cleanly.
+DROP EXTENSION helix CASCADE;
+NOTICE:  drop cascades to 5 other objects
+DETAIL:  drop cascades to view widgets_ai
+drop cascades to view order_lines_ai
+drop cascades to view owned_by_other_ai
+drop cascades to view notes_ai
+drop cascades to view docs_ai
+SELECT count(*) AS leftover_schema FROM pg_namespace WHERE nspname = 'helix_ai';
+ leftover_schema 
+-----------------
+               0
+(1 row)
+

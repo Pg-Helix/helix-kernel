@@ -1,0 +1,35 @@
+CREATE TABLE public.docs (id bigint PRIMARY KEY, title text);
+INSERT INTO public.docs VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e');
+SET helix.tenant = 'status-tenant';
+SELECT helix_ai.register_source('public', 'docs', 'embed-v1', 'rev1', 'pipeline-v1') AS docs_source_id \gset
+INSERT INTO helix_ai.derived_value (source_id, tenant, source_key, status, value, generated_at) VALUES
+    (:docs_source_id, 'status-tenant', jsonb_build_object('id', '1'), 'pending', NULL, NULL),
+    (:docs_source_id, 'status-tenant', jsonb_build_object('id', '2'), 'ready',   '"v"', now()),
+    (:docs_source_id, 'status-tenant', jsonb_build_object('id', '3'), 'stale',   '"v-old"', now()),
+    (:docs_source_id, 'status-tenant', jsonb_build_object('id', '4'), 'failed',  NULL, NULL),
+    (:docs_source_id, 'status-tenant', jsonb_build_object('id', '5'), 'deleted', NULL, NULL);
+-- Every pseudo-column status (RFC-0003) surfaces correctly through the view.
+SELECT (source_key->>'id')::int AS doc_id, status
+FROM helix_ai.status
+WHERE source_id = :docs_source_id
+ORDER BY doc_id;
+ doc_id | status  
+--------+---------
+      1 | pending
+      2 | ready
+      3 | stale
+      4 | failed
+      5 | deleted
+(5 rows)
+
+-- Same thing read through the enriched view's ai_status column.
+SELECT id, ai_status FROM public.docs_ai ORDER BY id;
+ id | ai_status 
+----+-----------
+  1 | pending
+  2 | ready
+  3 | stale
+  4 | failed
+  5 | deleted
+(5 rows)
+

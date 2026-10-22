@@ -1,0 +1,20 @@
+CREATE TABLE public.order_lines (
+    order_id  bigint NOT NULL,
+    line_no   int NOT NULL,
+    sku       text,
+    PRIMARY KEY (order_id, line_no)
+);
+INSERT INTO public.order_lines VALUES (100, 1, 'sku-a'), (100, 2, 'sku-b');
+
+SET helix.tenant = 'acme';
+SELECT helix_ai.register_source('public', 'order_lines', 'classify-v1', 'rev1', 'pipeline-v1') AS order_lines_source_id \gset
+
+-- key_columns is auto-detected from the real composite primary key, in
+-- key order, never caller-supplied.
+SELECT key_columns FROM helix_ai.source WHERE id = :order_lines_source_id;
+
+INSERT INTO helix_ai.derived_value (source_id, tenant, source_key, status, value, generated_at)
+VALUES (:order_lines_source_id, 'acme', jsonb_build_object('order_id', '100', 'line_no', '2'), 'ready', '"gift"', now());
+
+-- Only the row whose composite key matches the sidecar entry picks up a value.
+SELECT order_id, line_no, sku, ai_value, ai_status FROM public.order_lines_ai ORDER BY line_no;
