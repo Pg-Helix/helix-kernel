@@ -30,6 +30,19 @@ cc_next_gate_key() {
 
 cc_gate_open() {
     # $1 = fifo path, $2 = gate key
+    #
+    # Returning as soon as the lock command is merely QUEUED into the
+    # holder session's pipe (the previous version of this function) is
+    # not the same as the holder having actually ACQUIRED the lock --
+    # the holder is a brand-new connection that still has to fork/exec
+    # psql and complete a DB handshake before it executes anything it
+    # was handed. If the two racer sessions below happen to connect and
+    # reach their own pg_advisory_lock_shared call first, they find the
+    # gate key unlocked and sail straight through without ever
+    # appearing in pg_locks as a waiter -- a real race reproduced
+    # locally and in CI (intermittent "never saw two waiters (saw 0)").
+    # So this function now blocks until pg_locks shows the holder's
+    # lock as GRANTED before returning, closing the gate for real.
     fifo=$1
     key=$2
     rm -f "$fifo"
@@ -38,6 +51,25 @@ cc_gate_open() {
     echo $! > "$fifo.pid"
     exec 8>"$fifo"
     echo "SELECT pg_advisory_lock($key);" >&8
+
+    i=0
+    while true; do
+        held=$($PSQL -tAc "
+            SELECT count(*) FROM pg_locks
+            WHERE locktype = 'advisory' AND granted
+              AND ((classid::bigint << 32) | (objid::bigint & 4294967295)) = $key::bigint
+        " 2>/dev/null || echo 0)
+        if [ "${held:-0}" -ge 1 ]; then
+            break
+        fi
+        i=$((i + 1))
+        if [ "$i" -gt 400 ]; then
+            echo "gate: holder session never actually acquired advisory lock $key" >&2
+            cat /tmp/concurrency_gate.out >&2
+            return 1
+        fi
+        sleep 0.05
+    done
 }
 
 # Blocks (polling, bounded) until pg_locks shows two distinct sessions
@@ -51,7 +83,7 @@ cc_gate_release_when_both_waiting() {
         waiters=$($PSQL -tAc "
             SELECT count(*) FROM pg_locks
             WHERE locktype = 'advisory' AND NOT granted
-              AND ((classid::bigint << 32) | objid::bigint) = $key::bigint
+              AND ((classid::bigint << 32) | (objid::bigint & 4294967295)) = $key::bigint
         " 2>/dev/null || echo 0)
         if [ "${waiters:-0}" -ge 2 ]; then
             break
@@ -91,7 +123,12 @@ cc_run_scenario() {
     fi
 
     fifo="/tmp/concurrency_gate_$$_$gate_key"
-    cc_gate_open "$fifo" "$gate_key"
+    if ! cc_gate_open "$fifo" "$gate_key"; then
+        echo "FAIL: $name (gate holder never acquired its lock)"
+        rm -f "$fifo" "$fifo.pid"
+        dropdb --if-exists --force "$db"
+        return 1
+    fi
 
     $PSQL -v gate_key="$gate_key" -f "$dir/$a" > /tmp/concurrency_a.out 2>&1 &
     pid_a=$!
@@ -102,7 +139,7 @@ cc_run_scenario() {
         kill "$pid_a" "$pid_b" 2>/dev/null || true
         wait "$pid_a" 2>/dev/null || true
         wait "$pid_b" 2>/dev/null || true
-        cat /tmp/concurrency_gate.out
+        cat /tmp/concurrency_gate.out /tmp/concurrency_a.out /tmp/concurrency_b.out
         echo "FAIL: $name (sessions never both reached the gate)"
         rm -f "$fifo" "$fifo.pid"
         dropdb --if-exists --force "$db"
