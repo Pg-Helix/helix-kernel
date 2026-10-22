@@ -1,4 +1,4 @@
-\i _install.sql
+\ir _install.sql
 
 CREATE TABLE public.cc_publish (id bigint PRIMARY KEY, body text);
 SET helix.tenant = 'cc-tenant';
@@ -10,6 +10,14 @@ INSERT INTO public.cc_publish VALUES (1, 'alpha');
 -- same job's identity/expected_* values that setup here already claimed.
 CREATE TABLE public.cc_handoff (key text PRIMARY KEY, value text);
 GRANT SELECT ON public.cc_handoff TO helix_worker;
+
+-- Each racer session records its own outcome here, keyed by session, so
+-- the check can verify BOTH sessions genuinely attempted publish_result
+-- -- not just that the final sidecar state is consistent with however
+-- many of them did (see check_competing_claim.sql's comment for the
+-- same gap in the claim scenario, caught by selftest.sh).
+CREATE TABLE public.cc_publish_results (session text PRIMARY KEY, outcome text NOT NULL);
+GRANT SELECT, INSERT ON public.cc_publish_results TO helix_worker;
 
 -- First claim (epoch 1), then force its lease to look expired and
 -- re-claim the SAME job at a higher epoch (epoch 2) -- exactly

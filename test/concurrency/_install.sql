@@ -14,25 +14,10 @@ END $$;
 
 CREATE EXTENSION helix;
 
-ALTER SCHEMA helix_ai OWNER TO helix_owner;
-ALTER TABLE helix_ai.source OWNER TO helix_owner;
-ALTER TABLE helix_ai.derived_value OWNER TO helix_owner;
-ALTER TYPE helix_ai.pseudo_column_status OWNER TO helix_owner;
-ALTER VIEW helix_ai.status OWNER TO helix_owner;
-ALTER FUNCTION helix_ai.version() OWNER TO helix_owner;
-ALTER FUNCTION helix_ai._source_key_expr(name[], name) OWNER TO helix_owner;
-ALTER FUNCTION helix_ai._create_enriched_view(bigint) OWNER TO helix_owner;
-ALTER FUNCTION helix_ai.register_source(name, name, text, text, text, integer, text) OWNER TO helix_owner;
-ALTER TABLE helix_ai.job OWNER TO helix_owner;
-ALTER TYPE helix_ai.publish_outcome OWNER TO helix_owner;
-ALTER FUNCTION helix_ai._row_key_jsonb(name[], record) OWNER TO helix_owner;
-ALTER FUNCTION helix_ai._tombstone_key(bigint, text, jsonb) OWNER TO helix_owner;
-ALTER FUNCTION helix_ai._capture_change() OWNER TO helix_owner;
-ALTER FUNCTION helix_ai._ensure_capture_trigger(name, name) OWNER TO helix_owner;
-ALTER FUNCTION helix_ai.request_refresh(bigint, jsonb) OWNER TO helix_owner;
-ALTER FUNCTION helix_ai.claim_job(text, integer, integer) OWNER TO helix_owner;
-ALTER FUNCTION helix_ai.publish_result(uuid, integer, text, text, text, jsonb) OWNER TO helix_owner;
-ALTER FUNCTION helix_ai.get_job_input(uuid, integer) OWNER TO helix_owner;
+-- Single canonical ownership-reassignment script (ADR-0006 decision 1),
+-- not a hand-maintained copy of the same object list -- see
+-- sql/post_install_ownership.sql.
+\ir ../../sql/post_install_ownership.sql
 
 GRANT CREATE ON SCHEMA public TO helix_owner;
 ALTER DEFAULT PRIVILEGES GRANT SELECT, TRIGGER ON TABLES TO helix_owner;
