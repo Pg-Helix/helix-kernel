@@ -497,6 +497,19 @@ REVOKE ALL ON FUNCTION helix_ai._ensure_capture_trigger(name, name) FROM PUBLIC;
 -- retry after a dead-lettered job, or simply asking for (re)processing
 -- without waiting on a row change. A tombstoned key cannot be refreshed:
 -- its source row is gone: there is nothing to read.
+--
+-- Handoff-review finding #3 (2026-10-22): this was PUBLIC-executable with
+-- no caller-side check at all, unlike register_source's has_table_privilege
+-- gate -- a worker that can set helix.tenant to a value matching some
+-- tenant's source (a writable GUC, not authentication) could mint a job
+-- for any source/key it merely knows, then (before the get_job_input fix
+-- below) read that tenant's row content without ever claiming anything.
+-- The same has_table_privilege(caller, relid, 'SELECT') pattern
+-- register_source uses closes this: only a caller who could already read
+-- the application table directly may ask for it to be refreshed.
+-- helix_worker never holds that grant by design (RFC-0003), so this
+-- naturally excludes it without needing a role-specific REVOKE (which
+-- would be a no-op against a PUBLIC grant anyway).
 CREATE FUNCTION helix_ai.request_refresh(p_source_id bigint, p_source_key jsonb)
 RETURNS uuid
 LANGUAGE plpgsql
@@ -505,6 +518,8 @@ SET search_path = pg_catalog, helix_ai
 AS $$
 DECLARE
     v_source     helix_ai.source%ROWTYPE;
+    v_relid      oid;
+    v_caller     text;
     v_digest     text;
     v_generation bigint;
     v_job_id     uuid;
@@ -514,6 +529,20 @@ BEGIN
     SELECT * INTO v_source FROM helix_ai.source WHERE id = p_source_id;
     IF v_source.id IS NULL THEN
         RAISE EXCEPTION 'helix: source % not registered', p_source_id;
+    END IF;
+
+    SELECT c.oid INTO v_relid
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = v_source.schema_name AND c.relname = v_source.table_name;
+
+    v_caller := current_setting('role');
+    IF v_caller = 'none' THEN
+        v_caller := session_user::text;
+    END IF;
+
+    IF v_relid IS NULL OR NOT pg_catalog.has_table_privilege(v_caller, v_relid, 'SELECT') THEN
+        RAISE EXCEPTION 'helix: insufficient privilege on source % to request a refresh', p_source_id;
     END IF;
 
     IF EXISTS (
@@ -669,7 +698,14 @@ BEGIN
         RETURN 'dead_lettered';
     END IF;
 
-    IF v_job.completed_at IS NOT NULL OR v_job.lease_epoch <> p_lease_epoch THEN
+    -- lease_epoch = 0 is the never-claimed default (claim_job always
+    -- increments it to >= 1 before returning a job), not an acquired
+    -- lease -- rejecting it here closes the same class of gap the
+    -- handoff review's finding #3 reproduced against get_job_input:
+    -- a caller presenting epoch 0 has not claimed anything, regardless
+    -- of whether it happens to equal the job's own still-unclaimed epoch.
+    IF p_lease_epoch IS NULL OR p_lease_epoch <= 0
+       OR v_job.completed_at IS NOT NULL OR v_job.lease_epoch = 0 OR v_job.lease_epoch <> p_lease_epoch THEN
         RETURN 'stale_lease';
     END IF;
 
@@ -724,6 +760,23 @@ REVOKE ALL ON FUNCTION helix_ai.publish_result(uuid, integer, text, text, text, 
 -- privilege granted to the worker role. Rows over 1 MiB are rejected
 -- rather than silently truncated, so a worker can bound its own read
 -- instead of discovering mid-inference that it only got part of a row.
+--
+-- Handoff-review findings #3/#4 (2026-10-22), both closed here:
+--   #3 unclaimed input: lease_epoch = 0 is the never-claimed default
+--      (claim_job always increments it to >= 1), not an acquired lease.
+--      A caller presenting epoch 0 -- e.g. the job_id PUBLIC
+--      request_refresh just handed back, never claimed by anyone -- was
+--      previously accepted because 0 = 0. Source/key knowledge plus a
+--      writable helix.tenant is not authorization; now rejected
+--      regardless of what epoch the job itself still carries.
+--   #4 obsolete input: this function validated the job's *lease* state
+--      but never the *row's* state -- a lease acquired before a
+--      delete+reinsert (or any content change) could still read
+--      whatever now exists at that key. Now locks the sidecar row
+--      (FOR SHARE) and checks its generation before reading the base
+--      table at all, then re-checks the actual row's digest too, so a
+--      concurrent tombstone/reactivation can't commit in the gap between
+--      the two reads and neither check alone has to be perfectly timed.
 CREATE FUNCTION helix_ai.get_job_input(p_job_id uuid, p_lease_epoch integer)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -731,23 +784,39 @@ SECURITY DEFINER
 SET search_path = pg_catalog, helix_ai
 AS $$
 DECLARE
-    v_job    helix_ai.job%ROWTYPE;
-    v_source helix_ai.source%ROWTYPE;
-    v_col    name;
-    v_conds  text[] := '{}';
-    v_input  jsonb;
+    v_job        helix_ai.job%ROWTYPE;
+    v_source     helix_ai.source%ROWTYPE;
+    v_dv_status  helix_ai.pseudo_column_status;
+    v_generation bigint;
+    v_col        name;
+    v_conds      text[] := '{}';
+    v_input      jsonb;
+    v_digest     text;
 BEGIN
     -- Job ids are random (gen_random_uuid()); deliberately not interpolated
     -- into these messages, same as publish_result's own errors -- a
     -- message that echoed it could never match a fixed expected-output
     -- fixture across runs.
     SELECT * INTO v_job FROM helix_ai.job WHERE job_id = p_job_id;
-    IF v_job.job_id IS NULL OR v_job.completed_at IS NOT NULL OR v_job.dead_letter
-       OR v_job.lease_epoch <> p_lease_epoch THEN
+    IF p_lease_epoch IS NULL OR p_lease_epoch <= 0
+       OR v_job.job_id IS NULL OR v_job.completed_at IS NOT NULL OR v_job.dead_letter
+       OR v_job.lease_epoch = 0 OR v_job.lease_epoch <> p_lease_epoch THEN
         RAISE EXCEPTION 'helix: lease_invalid: job is not currently leased at epoch %', p_lease_epoch;
     END IF;
 
     PERFORM set_config('helix.tenant', v_job.tenant, true);
+
+    -- Lock the sidecar row for this key so a concurrent delete/reinsert
+    -- (which tombstones, then reactivates with a bumped generation) can't
+    -- commit between this check and the base-table read below.
+    SELECT status, generation INTO v_dv_status, v_generation
+    FROM helix_ai.derived_value
+    WHERE source_id = v_job.source_id AND source_key = v_job.source_key
+    FOR SHARE;
+
+    IF v_dv_status IS NULL OR v_dv_status = 'deleted' OR v_generation <> v_job.source_generation THEN
+        RAISE EXCEPTION 'helix: stale_source: this job''s source row has changed since it was issued';
+    END IF;
 
     SELECT * INTO v_source FROM helix_ai.source WHERE id = v_job.source_id;
 
@@ -755,12 +824,18 @@ BEGIN
         v_conds := v_conds || format('%I = %L', v_col, v_job.source_key ->> v_col);
     END LOOP;
 
-    EXECUTE format('SELECT to_jsonb(t) FROM %I.%I AS t WHERE %s',
+    EXECUTE format('SELECT to_jsonb(t), md5(t::text) FROM %I.%I AS t WHERE %s',
         v_source.schema_name, v_source.table_name, array_to_string(v_conds, ' AND '))
-    INTO v_input;
+    INTO v_input, v_digest;
 
-    IF v_input IS NULL THEN
-        RAISE EXCEPTION 'helix: source row for this job no longer exists';
+    -- Defense in depth beyond the generation check above: an in-place
+    -- UPDATE that doesn't change the key or go through a delete bumps no
+    -- generation, but does change the digest -- the same staleness
+    -- publish_result's CAS already rejects at write time, checked here
+    -- too so a read can't hand out content a write could never have
+    -- published against this job.
+    IF v_input IS NULL OR v_digest IS DISTINCT FROM v_job.source_digest THEN
+        RAISE EXCEPTION 'helix: stale_source: this job''s source row has changed since it was issued';
     END IF;
 
     IF pg_column_size(v_input) > 1048576 THEN

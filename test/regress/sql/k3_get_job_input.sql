@@ -43,3 +43,40 @@ SET ROLE helix_worker;
 SELECT j.* FROM helix_ai.claim_job('embed-v1:jobinput-rev') AS j \gset
 SELECT helix_ai.get_job_input(:'job_id', :lease_epoch);
 RESET ROLE;
+
+-- Handoff-review finding #3 (2026-10-22): an UNCLAIMED job's lease_epoch
+-- is 0, the never-claimed default -- not an acquired lease, even though
+-- it trivially "matches" a caller presenting 0. request_refresh enqueues
+-- a job without anyone claiming it; get_job_input at epoch 0 must be
+-- rejected, not treated as a valid lease.
+INSERT INTO public.k3_input VALUES (4, 'unclaimed');
+SELECT helix_ai.request_refresh(:k3_input_source_id, jsonb_build_object('id', '4')) AS unclaimed_job_id \gset
+SET ROLE helix_worker;
+SELECT helix_ai.get_job_input(:'unclaimed_job_id', 0);
+RESET ROLE;
+
+-- Drain the still-unclaimed jobs above before the next case: the INSERT's
+-- own capture trigger AND the explicit request_refresh call each
+-- enqueued a separate job for id=4 (no dedup against outstanding jobs,
+-- documented kernel behavior) -- both must be drained, or the older of
+-- the two would be claimed by the claim_job('embed-v1:jobinput-rev')
+-- call below instead of the new job it's meant to test.
+SELECT (helix_ai.claim_job('embed-v1:jobinput-rev')).job_id IS NOT NULL AS unclaimed_job_drained_1;
+SELECT (helix_ai.claim_job('embed-v1:jobinput-rev')).job_id IS NOT NULL AS unclaimed_job_drained_2;
+
+-- Handoff-review finding #4 (2026-10-22): a lease acquired before the
+-- source row was deleted and an identically-keyed replacement inserted
+-- must not be able to read the replacement's content -- the generation
+-- fence (ADR-0006 decision 3) that already protects publish_result's CAS
+-- must also gate this read, not just the later write.
+INSERT INTO public.k3_input VALUES (5, 'original-content');
+SET ROLE helix_worker;
+SELECT j.* FROM helix_ai.claim_job('embed-v1:jobinput-rev') AS j \gset
+\set stale_job_id :job_id
+\set stale_epoch :lease_epoch
+RESET ROLE;
+DELETE FROM public.k3_input WHERE id = 5;
+INSERT INTO public.k3_input VALUES (5, 'replacement-content');
+SET ROLE helix_worker;
+SELECT helix_ai.get_job_input(:'stale_job_id', :stale_epoch);
+RESET ROLE;

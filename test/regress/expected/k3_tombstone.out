@@ -27,4 +27,4 @@ SELECT status, value FROM helix_ai.status WHERE source_id = :k3_notes_source_id;
 -- request_refresh also refuses a tombstoned key.
 SELECT helix_ai.request_refresh(:k3_notes_source_id, jsonb_build_object('id', '1'));
 ERROR:  helix: source key {"id": "1"} is deleted; cannot request a refresh
-CONTEXT:  PL/pgSQL function request_refresh(bigint,jsonb) line 19 at RAISE
+CONTEXT:  PL/pgSQL function request_refresh(bigint,jsonb) line 35 at RAISE
