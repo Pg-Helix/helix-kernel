@@ -53,7 +53,14 @@ CREATE TABLE helix_ai.source (
     metric           text,
     pipeline_version text NOT NULL,
     created_at       timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (tenant, schema_name, table_name, model_id, pipeline_version)
+    -- model_revision is part of this binding's identity, not metadata on
+    -- top of it: a changed revision under the SAME model_id/pipeline
+    -- must register as a genuinely distinct source, or a real-provider
+    -- revision cutover would silently compare new query vectors against
+    -- old document vectors published under the old revision. Previously
+    -- omitted here, which made a second register_source call for a new
+    -- revision raise a unique_violation instead of creating a new row.
+    UNIQUE (tenant, schema_name, table_name, model_id, model_revision, pipeline_version)
 );
 
 ALTER TABLE helix_ai.source ENABLE ROW LEVEL SECURITY;
@@ -155,8 +162,20 @@ DECLARE
 BEGIN
     SELECT * INTO v_source FROM helix_ai.source WHERE id = p_source_id;
 
+    -- CREATE OR REPLACE, not a plain CREATE: a second source registered
+    -- for the SAME table (a real-provider revision/binding cutover,
+    -- ADR-0007) must not fail this view with "relation already exists".
+    -- This view only ever joins one fixed source_id's sidecar data by
+    -- construction (see the join condition below), so it reflects
+    -- whichever source was registered most recently for this table --
+    -- an existing, now-explicit limitation of this single-binding
+    -- convenience view. No current caller relies on it for a table that
+    -- ever has more than one binding (Workflow 1's demo tables have
+    -- exactly one; Workflow 2/cortex never queries this view at all,
+    -- reading helix_ai.derived_value directly with its own explicit
+    -- source_id filter instead).
     EXECUTE format(
-        'CREATE VIEW %I.%I WITH (security_invoker = true) AS
+        'CREATE OR REPLACE VIEW %I.%I WITH (security_invoker = true) AS
          SELECT src.*, dv.value AS ai_value, dv.status AS ai_status, dv.generated_at AS ai_generated_at
          FROM %I.%I AS src
          LEFT JOIN helix_ai.derived_value dv
@@ -256,9 +275,23 @@ BEGIN
         RAISE EXCEPTION 'helix: table %.% has no primary key; register_source requires a stable row key', p_schema, p_table;
     END IF;
 
+    -- Idempotent under a concurrent duplicate call for the exact same
+    -- binding: ON CONFLICT DO NOTHING + a fallback SELECT, rather than
+    -- letting the unique_violation propagate. A caller that catches that
+    -- error and immediately re-queries in the SAME transaction would hit
+    -- "current transaction is aborted" instead of finding the row --
+    -- fixed here, once, for every caller, rather than requiring a
+    -- SAVEPOINT in each one.
     INSERT INTO helix_ai.source (tenant, schema_name, table_name, key_columns, model_id, model_revision, dims, metric, pipeline_version)
     VALUES (v_tenant, p_schema, p_table, v_key_columns, p_model_id, p_model_revision, p_dims, p_metric, p_pipeline_version)
+    ON CONFLICT (tenant, schema_name, table_name, model_id, model_revision, pipeline_version) DO NOTHING
     RETURNING id INTO v_id;
+
+    IF v_id IS NULL THEN
+        SELECT id INTO v_id FROM helix_ai.source
+        WHERE tenant = v_tenant AND schema_name = p_schema AND table_name = p_table
+          AND model_id = p_model_id AND model_revision = p_model_revision AND pipeline_version = p_pipeline_version;
+    END IF;
 
     PERFORM helix_ai._create_enriched_view(v_id);
     PERFORM helix_ai._ensure_capture_trigger(p_schema, p_table);

@@ -4,7 +4,7 @@
 -- Extension-owned objects (helix_ai itself and everything in it) are still
 -- removed cleanly.
 DROP EXTENSION helix CASCADE;
-NOTICE:  drop cascades to 32 other objects
+NOTICE:  drop cascades to 34 other objects
 DETAIL:  drop cascades to view widgets_ai
 drop cascades to view order_lines_ai
 drop cascades to view owned_by_other_ai
@@ -21,6 +21,7 @@ drop cascades to view k3_scope_a_ai
 drop cascades to view k3_scope_b_ai
 drop cascades to view k3_input_ai
 drop cascades to view k3_refresh_auth_ai
+drop cascades to view revcheck_ai
 drop cascades to trigger helix_ai_capture on table widgets
 drop cascades to trigger helix_ai_capture on table order_lines
 drop cascades to trigger helix_ai_capture on table owned_by_other
@@ -37,6 +38,7 @@ drop cascades to trigger helix_ai_capture on table k3_scope_a
 drop cascades to trigger helix_ai_capture on table k3_scope_b
 drop cascades to trigger helix_ai_capture on table k3_input
 drop cascades to trigger helix_ai_capture on table k3_refresh_auth
+drop cascades to trigger helix_ai_capture on table revcheck
 SELECT count(*) AS leftover_schema FROM pg_namespace WHERE nspname = 'helix_ai';
  leftover_schema 
 -----------------

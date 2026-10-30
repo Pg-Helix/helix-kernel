@@ -7,6 +7,7 @@ REGRESS      = setup register_basic register_composite_key register_rejects_keyl
                k3_capture_and_claim k3_publish_result_cas k3_tombstone k3_lease_expiry k3_worker_role_boundary \
                k3_generation_fence k3_dead_letter k3_claim_model_scope k3_get_job_input \
                k3_request_refresh_authorization \
+               k3_model_revision_identity \
                teardown
 PG_CPPFLAGS  = -I$(CURDIR)/include
 
